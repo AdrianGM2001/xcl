@@ -1270,7 +1270,7 @@ fn measure_pso_result(input: &Input, hash: u64, repeat: usize, windows: u32, spl
         let c = recomp::pso::direct_compute(&blob, 0, windows, split).map_err(|e| Failed(format!("{name}: direct: {e}")))?;
         (c.dxil, c.samplers)
     } else {
-        let (translation, profile) = recomp::pso::console_translation(&blob, recomp::pso::Stage::Compute, 0, windows, split).map_err(|e| Failed(format!("{name}: {e}")))?;
+        let (translation, profile) = recomp::pso::console_translation(&blob, recomp::pso::Stage::Compute, 0, windows, split, false).map_err(|e| Failed(format!("{name}: {e}")))?;
         let dxil = recomp::dxc::compile(&translation.hlsl, "main", profile, &[]).map_err(|e| Failed(format!("DXC: {e}")))?;
         (dxil, translation.static_samplers)
     };

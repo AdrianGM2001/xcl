@@ -288,9 +288,6 @@ mod translated {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub(super) enum Backend {
         Hlsl,
-        /// the HLSL path, huge compute programs (direct DXIL of at least this many bytes,
-        /// `huge_direct_min`) through the direct translator
-        HlslHugeDirect(usize),
         /// direct DXIL for compute + the mesh pass (`=1`)
         DirectCompute,
         /// direct DXIL for VS / PS too (`=all`)
@@ -302,7 +299,7 @@ mod translated {
             match (crate::gpu::dxil::kernel::enabled(), crate::gpu::dxil::kernel::enabled_graphics()) {
                 (_, true) => Backend::DirectAll,
                 (true, false) => Backend::DirectCompute,
-                _ => super::huge_direct_min().map_or(Backend::Hlsl, Backend::HlslHugeDirect),
+                _ => Backend::Hlsl,
             }
         }
     }
@@ -318,14 +315,13 @@ mod translated {
         let base = identity_for(source, toolchain);
         let tag = match backend {
             Backend::Hlsl => return base,
-            Backend::HlslHugeDirect(min) => return identity_tagged(base, &format!("huge-direct-{min}"), direct_version),
             Backend::DirectCompute => "compute",
             Backend::DirectAll => "all",
         };
         identity_tagged(base, tag, direct_version)
     }
 
-    fn identity_tagged(base: u64, tag: &str, direct_version: u32) -> u64 {
+    fn identity_tagged(base: u64, tag: &str, direct_version: u64) -> u64 {
         let mut h = base;
         for part in ["xcl-direct-dxil", tag, &direct_version.to_string()] {
             for byte in part.bytes().chain([0]) {
@@ -742,7 +738,7 @@ fn compile_console_shader(blob: &[u8], stage: Stage, sampler_base: u32, windows:
             match direct_compute(blob, sampler_base, windows, split_wave64) {
                 Ok(c) if c.dxil.len() >= min => {
                     crate::xlog_info!("[SHADER] huge compute program {:016x}: direct DXIL ({} B)", crate::gpu::shader::fnv64(blob), c.dxil.len());
-                    return Ok(c);
+                    return Ok((c, true));
                 }
                 Ok(_) => {}
                 Err(e) => crate::xlog_info!("[SHADER] huge-program direct DXIL unavailable: {}", e.lines().next().unwrap_or("")),
@@ -1932,9 +1928,6 @@ mod shader_cache_tests {
             hlsl,
             identity_with("s", "t", Backend::DirectCompute, 1),
             identity_with("s", "t", Backend::DirectAll, 1),
-            identity_with("s", "t", Backend::HlslHugeDirect(64 << 10), 1),
-            identity_with("s", "t", Backend::HlslHugeDirect(64 << 10), 2),
-            identity_with("s", "t", Backend::HlslHugeDirect(128 << 10), 1),
             identity_with("s", "t", Backend::DirectCompute, 2),
             identity_with("s2", "t", Backend::DirectCompute, 1),
             identity_with("s", "t2", Backend::DirectCompute, 1),
