@@ -7978,7 +7978,8 @@ fn dispatch_thread_limits_seed_compute_exec_for_native_and_remapped_groups() {
     assert!(native.hlsl.contains("uint xcl_limit_y = io.Load(460u);"));
     assert!(native.hlsl.contains("gid.y * 8u + gtid.y < xcl_limit_y"));
     assert!(!native.hlsl.contains("xcl_limit_z"), "a one-thread axis is always whole");
-    assert!(native.hlsl.contains("if (xcl_dispatch_limited)"));
+    assert!(native.hlsl.contains("if (WaveActiveAllTrue(xcl_dispatch_limited))"),
+        "the branch around split-wave rendezvous must be wave-uniform");
     assert!(native.hlsl.contains("ballot(xcl_dispatch_live)"));
     assert!(native.hlsl.contains("ballot(true)"), "ordinary Dispatch keeps the original entry ballot");
 
