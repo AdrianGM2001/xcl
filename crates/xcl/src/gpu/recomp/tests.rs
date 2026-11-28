@@ -76,6 +76,12 @@ fn direct_enabled(opt: &Options) -> bool {
     runner::direct_dxil() && opt.mem_windows <= 4 && (opt.hw_wave == 0 || (opt.hw_wave == 32 && !opt.wave64))
 }
 
+/// Direct-DXIL refusals the runtime answers with the HLSL path (`dxil::lower`'s s_barrier,
+/// `kernel` / `lower_dxil`'s split wave64 LDS): a test takes the HLSL form there, as the runtime.
+fn routed_to_hlsl(e: &str) -> bool {
+    e.contains("s_barrier in a group of several hardware waves") || e.contains("split wave64 LDS access needs the HLSL path")
+}
+
 fn direct_or(code: &[u8], opt: &Options, hlsl: Vec<u8>) -> Vec<u8> {
     use crate::gpu::dxil::kernel::{translate, translate_compute, KernelOptions};
     if !direct_enabled(opt) {
@@ -86,17 +92,20 @@ fn direct_or(code: &[u8], opt: &Options, hlsl: Vec<u8>) -> Vec<u8> {
     let mem_windows = if opt.heap_windows && opt.mem_windows > 1 { opt.mem_windows | super::HEAP_WINDOWS } else { opt.mem_windows };
     let o = KernelOptions { wave64: opt.wave64, split, mem_windows, sampler_base: opt.static_sampler_base };
     match &opt.mode {
-        Mode::Kernel => translate(code, o).unwrap_or_else(|e| panic!("direct DXIL: {e}")),
-        // (a group barrier in a group of several hardware waves is left to the HLSL path, as
-        // the runtime's fallback does: `dxil::lower`'s s_barrier)
+        Mode::Kernel => match translate(code, o) {
+            Ok(dxil) => dxil,
+            Err(e) if routed_to_hlsl(&e) => hlsl,
+            Err(e) => panic!("direct DXIL: {e}"),
+        },
+        // (what the runtime leaves to the HLSL path: `routed_to_hlsl`)
         Mode::Compute(cs) => match translate_compute(code, o, cs) {
             Ok(k) => k.dxil,
-            Err(e) if e.contains("s_barrier in a group of several hardware waves") => hlsl,
+            Err(e) if routed_to_hlsl(&e) => hlsl,
             Err(e) => panic!("direct DXIL: {e}"),
         },
         Mode::Mesh(ms) => match crate::gpu::dxil::kernel::translate_mesh(code, o, ms) {
             Ok(k) => k.dxil,
-            Err(e) if e.contains("s_barrier in a group of several hardware waves") => hlsl,
+            Err(e) if routed_to_hlsl(&e) => hlsl,
             Err(e) => panic!("direct DXIL: {e}"),
         },
         Mode::Vertex(vs) => crate::gpu::dxil::kernel::translate_vertex(code, o, vs).unwrap_or_else(|e| panic!("direct DXIL: {e}")).dxil,
@@ -5309,14 +5318,20 @@ fn gpu_compute_mode_dispatch_abi() {
     assert!(t.complete(), "{:?}", t.unsupported_why);
     let hlsl_dxil = dxc::compile(&t.hlsl, "main", "cs_6_6", &[]).unwrap_or_else(|e| panic!("{e}"));
     let split = opt.wave64 && (opt.split_wave64 || runner::split_wave64());
-    let direct_dxil = crate::gpu::dxil::kernel::translate_compute(
+    // (None: a form the runtime leaves to the HLSL path, `routed_to_hlsl`)
+    let direct_dxil = match crate::gpu::dxil::kernel::translate_compute(
         &p,
         crate::gpu::dxil::kernel::KernelOptions { wave64: opt.wave64, split, mem_windows: opt.mem_windows, sampler_base: opt.static_sampler_base },
         &cs,
-    )
-    .unwrap_or_else(|e| panic!("direct DXIL: {e}"))
-    .dxil;
-    let dxil = if direct_enabled(&opt) { direct_dxil.clone() } else { hlsl_dxil.clone() };
+    ) {
+        Ok(k) => Some(k.dxil),
+        Err(e) if routed_to_hlsl(&e) => None,
+        Err(e) => panic!("direct DXIL: {e}"),
+    };
+    let dxil = match &direct_dxil {
+        Some(direct) if direct_enabled(&opt) => direct.clone(),
+        _ => hlsl_dxil.clone(),
+    };
     let (w, h, base) = (32usize, 24usize, 0x100usize);
     let mut io = vec![0u32; 128];
     io[0] = base as u32;
@@ -5334,7 +5349,8 @@ fn gpu_compute_mode_dispatch_abi() {
 
     // DispatchX thread limits seed EXEC in both backends. The hardware groups still contain
     // 32x24 threads, but only the 20x17 console dispatch rectangle may reach memory.
-    for (backend, dxil) in [("HLSL", hlsl_dxil), ("direct DXIL", direct_dxil)] {
+    for (backend, dxil) in [("HLSL", Some(hlsl_dxil)), ("direct DXIL", direct_dxil)] {
+        let Some(dxil) = dxil else { continue };
         let mut limited_io = io.clone();
         limited_io[super::IO_THREAD_LIMIT[0]] = 20;
         limited_io[super::IO_THREAD_LIMIT[1]] = 17;
@@ -6094,9 +6110,15 @@ fn gpu_float_cas_uses_ieee_equality() {
     let t = translate(&code, &runner::options(Mode::Kernel)).unwrap();
     assert!(t.complete(), "{:?}", t.unsupported);
     let hlsl_dxil = super::dxc::compile(&t.hlsl, "main", "cs_6_6", &[]).map_err(|x| format!("{x}\n--- HLSL ---\n{}", t.hlsl)).unwrap();
-    let direct_dxil = runner::direct_kernel_full(&code, true).unwrap().dxil;
+    // (None: a form the runtime leaves to the HLSL path, `routed_to_hlsl`)
+    let direct_dxil = match runner::direct_kernel_full(&code, true) {
+        Ok(k) => Some(k.dxil),
+        Err(e) if routed_to_hlsl(&e) => None,
+        Err(e) => panic!("direct DXIL: {e}"),
+    };
 
-    for (backend, dxil) in [("hlsl", hlsl_dxil), ("direct_dxil", direct_dxil)] {
+    for (backend, dxil) in [("hlsl", Some(hlsl_dxil)), ("direct_dxil", direct_dxil)] {
+        let Some(dxil) = dxil else { continue };
         let r = runner::run_with_statics(&dxil, &st, &mem, &tex, &[], &[]).unwrap_or_else(|e| panic!("{backend}: {e}"));
         let old64 = |v: &[u32], at: usize| v[at] as u64 | (v[at + 1] as u64) << 32;
         let cell64 = |a: usize| r.mem[a / 4] as u64 | (r.mem[a / 4 + 1] as u64) << 32;
